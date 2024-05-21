@@ -1,0 +1,225 @@
+---
+title: "Social Forecasting Final"
+author: "Mason Ricci"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+install.packages("tidyverse")
+
+library(tidyverse)
+library(forecast)
+library(zoo)
+library(ggplot2)
+install.packages("ggplot2")
+```
+
+
+
+
+
+## Import Data
+
+I load in the data and take a quick look! Seems like consistent seasonality but no trend. Seasonality seems strongest at the 64 mark and the 441 mark so I will use these as my seasonal periods when creating my time series and consider them when dividing my series in test training and validation.
+
+```{r time series objects}
+# Load the dataset
+bus <- read.csv("/Users/riccimason99/Downloads/publicTransport_part.csv")
+#View(bus)
+
+# Save as Time Series 
+bus_ts <- ts(bus$DEMAND, frequency =  63)
+summary(bus_ts)
+plot(bus_ts)
+
+# Check out the Acf
+ggAcf(bus_ts, lag.max = length(bus_ts))
+ggAcf(bus_ts)
+```
+
+Split between train test and holdout, use a multi seasonal time series.
+I would like to split the data 80% training, 20% test but I have to insure that the time series are divided at the beginning of a season for ARIMA to work; therefore test will make up the first 882 observation as 882 is divisible by 441 evenly. 66% of the data will be training.The last season (440 observations) will be the test set. Data will now be saved as a multi seasonal time series.
+
+
+```{r multi seasonal ts}
+# Creat multi seasonal time series, use daily and weekly seasonailty 
+full <- msts(bus$DEMAND[1:1323], seasonal.periods = c(63, 441))
+train <- msts(bus$DEMAND[1:882], seasonal.periods = c(63, 441))
+val <- msts(bus$DEMAND[883:1323], seasonal.periods = c(63, 441))
+
+# Normal Time Series 
+full_ts <- ts(bus$DEMAND[1:1323])
+train_ts <- ts(bus$DEMAND[1:883])
+val_ts <- ts(bus$DEMAND[883:1323])
+```
+
+
+## First let me try the "dumb" average model as a baseline.
+
+```{r new}
+# Create the model
+ave_ <- meanf(train_ts, h = 440)
+# Check accuracy
+accuracy(ave_, full_ts)
+
+# Looks like we have a lot of zeros, this could be disrupting the MASE calculation
+sum(val_ts == 0)
+
+# This is the average usage
+autoplot(full) +
+  autolayer(ave_, series="average") + 
+  autolayer(full_ts, series="Actual")
+```
+
+The metric mean absolute error (MAE) was used to measure performance. Mean absolute scaled error (MASE) was not observed as models returned a value of infinity potentially because 108 points in the time series record zero people at the terminal. Having zeros could have interrupted calculations of MASE.
+
+
+### Seasonal Niave attempt
+
+```{r seasonal nai}
+#Seasonal Naive Model
+szn_nia <- snaive(train, h = 441)
+
+#Plot it
+plot(szn_nia)
+  lines(full)
+  
+#Check accuracy
+accuracy(szn_nia, full)
+```
+
+This model works VERY WELL as  there is consistent seasonality and no trend. I will continue to to try some model based forecasting methods.
+
+
+## Check Residuals 
+ 
+Residuals are not normally distributed and auto corrolation exists for multiple seasons. I'll try an ARIMA model since it is designed to deal with auto corrolation. 
+
+```{r residuals pacg}
+# Check Residuals and PACF
+checkresiduals(train)
+ggPacf(train, lag.max = 55)
+```
+
+# Lets Try an ARIMA model
+
+```{r ARIMA}
+# TRY MY OWN ARIMA
+custom_arima <- Arima(train_ts, order = c(2,0,1), seasonal = list(order = c(2,0,0), period = 63))
+custom_arima_pred <- forecast(custom_arima, h = 441)
+
+# Check accuracy
+accuracy(custom_arima_pred, full_ts)
+#summary(custom_arima)
+
+# Plot it 
+autoplot(custom_arima_pred) +
+  autolayer(full_ts)
+checkresiduals(custom_arima_pred)
+
+
+BoxCox.lambda(train_ts)
+#Try auto ARIMA, it is so bad...
+ARIM.pred <- train_ts %>% 
+  auto.arima(lambda = 0.4894103) %>% #run an ARIMA
+  forecast(h = 441)
+#summary(ARIM.pred)
+
+accuracy(ARIM.pred, full_ts)
+plot(ARIM.pred)
+lines(full_ts)
+```
+
+
+### Lets try regression with trend and seasonality as predictors.
+
+```{r regressions}
+# Use box cocks to get lambda
+BoxCox.lambda(train_ts)
+  
+# Try linear model
+lin_mod <- tslm(train ~ trend + season, lambda = 0.4894103)
+lin_mod_pred <- forecast(lin_mod, h = 441)
+
+# Check accuracy and residuals
+accuracy(lin_mod_pred, full)
+checkresiduals(lin_mod_pred)
+
+#plot it 
+plot(lin_mod_pred)
+  lines(full)
+``` 
+This model gives a great forecast but not as good as seasonal naive.
+
+### FINAL PREDICTION
+
+# After all that I can not find a model that will out preforem the seasonal niave model. So I will make my final prediction with seasonal niave
+
+```{r smoothing}
+# Final Forecast for three days into the feature. It is trained on the full time series.
+szn_final <- snaive(full, h = 189)
+
+# Define the breaks and corresponding labels for the x-axis
+breaks <- c(1, 2, 3, 4)
+labels <- c("May 1st", "May 6th", "May 11th", "May 21st")
+# Plot it
+autoplot(full, ylab = "Number of Passengers", ylim = c(0, 150), xlim = c(0, 5), xlab = NULL) + 
+  autolayer(szn_final, series = "March 22nd - 24th") +
+  scale_x_continuous(breaks = breaks, labels = labels) +
+  guides(colour = guide_legend(title = "Forecast"))
+```
+
+
+
+```{r polot lln}
+# Define breaks and labels for the x-axis
+breaks <- c(1, 2, 3, 4)
+labels <- c("March 1st, 6:30am\n (Tuesday)", "March 7th, 10pm\n (Monday)", "March 11th, 10pm\n (Monday)", "March 21st, 10pm\n (Monday)")
+
+# Plot the time series
+autoplot(full, ylab = "Number of Passengers", ylim = c(0, 150), xlab = NULL) + 
+  autolayer(szn_final, col = "red") +
+  autolayer(szn_nia, col = "lightblue") +
+  scale_x_continuous(breaks = breaks, labels = labels) +
+  ggtitle("Terminal Attendance Observed and Forecasted") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+# Plot the time series again
+autoplot(full, ylab = "Number of Passengers", ylim = c(0, 150), xlab = NULL) + 
+  autolayer(szn_final, col = "red") +
+  autolayer(szn_nia, col = rgb(1, 1, 0, alpha = 0.3)) +  # Yellow color with alpha value adjusted
+  scale_x_continuous(breaks = breaks, labels = labels) +
+  ggtitle("Terminal Attendance Observed and Forecasted") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+```
+
+
+### This model works great but I don't really understand it so I will not include it in the report.
+
+```{r Auto ARIMA}
+# Auto Arima with dynamic harmonic regression
+
+
+auto_train<- auto.arima(train, 
+                       xreg = fourier(train, K = c(10, 20)))
+
+auto_pred <- forecast(auto_train, xreg = fourier(val, K = c(10, 20)))
+accuracy(auto_pred, full)
+plot(auto_pred)
+#summary(auto_pred)
+
+```
+
+
+
+
+
+
+
+
